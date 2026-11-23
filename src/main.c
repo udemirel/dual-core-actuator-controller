@@ -1,53 +1,72 @@
 #include <stdio.h>
+#include <stdbool.h>
 #include "pico/stdlib.h"
 #include "pico/multicore.h"
-#include "hardware/sync.h"
+#include "hardware/sync.h" /* __dmb() makrosunu içerir */
 
-#define ITERATIONS 100000U
+#define TOTAL_MESSAGES 100000U
 
-volatile uint32_t g_counter = 0;
-spin_lock_t *g_lock = NULL;
+/* SPSC Paylaşımlı Alan (Spinlock YOK) */
+static volatile uint32_t g_shared_payload = 0;   /* Sadece Core 1 yazar, Core 0 okur */
+static volatile bool     g_data_ready     = false; /* Core 1 true yapar, Core 0 false yapar */
 
-/* Core 1 bu fonksiyonu çalıştıracak */
-void core1_worker(void) {
-    for (uint32_t i = 0; i < ITERATIONS; i++) {
-        /* 1. Kapıyı kilitle ve kendi kesmelerini kapat */
-        uint32_t irq_status = spin_lock_blocking(g_lock);
+/* Core 1: SINGLE PRODUCER (Tek Üretici) */
+void core1_producer(void) {
+    for (uint32_t i = 1; i <= TOTAL_MESSAGES; i++) {
+        /* 1. Core 0 bir önceki veriyi okuyup bayrağı indirene kadar bekle */
+        while (g_data_ready) {
+            tight_loop_contents();
+        }
 
-        /* --- KRİTİK BÖLGE (Aynı anda sadece tek çekirdek girebilir) --- */
-        g_counter++;
-        /* ------------------------------------------------------------- */
+        /* 2. Önce veriyi RAM'e yaz */
+        g_shared_payload = i;
 
-        /* 2. Kilidi aç ve kesmeleri eski haline getir */
-        spin_unlock(g_lock, irq_status);
+        /* 3. MEMORY BARRIER: Verinin RAM'e yazıldığından emin ol, sonra bayrağı kaldır! */
+        __dmb();
+
+        /* 4. Core 0'a "veri hazır" sinyali ver */
+        g_data_ready = true;
     }
 }
 
-/* Core 0 bu fonksiyonu çalıştıracak */
+/* Core 0: SINGLE CONSUMER (Tek Tüketici) */
 int main(void) {
     stdio_init_all();
     sleep_ms(2000);
 
-    /* Boşta olan donanımsal spinlock'lardan birini al (RP2350'de 32 adet vardır) */
-    int lock_num = spin_lock_claim_unused(true);
-    g_lock = spin_lock_init((uint)lock_num);
+    printf("\n[SPSC TEST] Starting Lock-Free transfer (%lu messages)...\n",
+           (unsigned long)TOTAL_MESSAGES);
 
-    /* Core 1'i uyandır ve core1_worker fonksiyonuna gönder */
-    multicore_launch_core1(core1_worker);
+    /* Core 1'i üretici olarak başlat */
+    multicore_launch_core1(core1_producer);
 
-    /* Core 0 da kendi 100.000 artışını yapsın */
-    for (uint32_t i = 0; i < ITERATIONS; i++) {
-        uint32_t irq_status = spin_lock_blocking(g_lock);
-        g_counter++;
-        spin_unlock(g_lock, irq_status);
+    uint32_t received_count = 0;
+    uint32_t error_count = 0;
+
+    for (uint32_t expected = 1; expected <= TOTAL_MESSAGES; expected++) {
+        /* 1. Core 1 veriyi hazırlayana kadar bekle */
+        while (!g_data_ready) {
+            tight_loop_contents();
+        }
+
+        /* 2. MEMORY BARRIER: Bayrağı okuduktan sonra taze veriyi RAM'den çek! */
+        __dmb();
+
+        /* 3. Veriyi oku ve doğrula */
+        uint32_t val = g_shared_payload;
+        if (val != expected) {
+            error_count++;
+        }
+        received_count++;
+
+        /* 4. Core 1 yeni veri yazabilsin diye bayrağı indir */
+        g_data_ready = false;
     }
 
-    /* Core 1'in işini bitirmesini kısa bir süre bekle */
-    sleep_ms(500);
-
-    /* Sonuç her zaman tam olarak 200000 çıkacaktır */
-    printf("Final Counter Value: %lu (Expected: %lu)\n",
-           (unsigned long)g_counter, (unsigned long)(ITERATIONS * 2));
+    printf("[RESULT] Received: %lu | Sequence Errors: %lu -> %s\n",
+           (unsigned long)received_count,
+           (unsigned long)error_count,
+           (error_count == 0U) ? "PASS (LOCK-FREE SPSC)" : "FAIL (ORDERING VIOLATION)");
 
     while (true) {
         tight_loop_contents();
