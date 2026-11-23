@@ -20,4 +20,11 @@ typedef struct {
 extern volatile SharedActuatorState_t g_shared_state;
 extern spin_lock_t *g_ipc_spinlock;
 
+// IPC ring buffer size for multicore FIFO notifications (must be a power of 2)
+#define IPC_RING_BUFFER_SIZE 16U
+
+typedf struct
+
+
+
 #endif /* SHARED_IPC_H */
