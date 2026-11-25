@@ -32,7 +32,9 @@ void core1_producer(void) {
 /* Core 0: SINGLE CONSUMER (Tek Tüketici) */
 int main(void) {
     stdio_init_all();
-    sleep_ms(2000);
+    // sleep_ms(2000);
+
+    while (!stdio_usb_connected()) { sleep_ms(50); }
 
     printf("\n[SPSC TEST] Starting Lock-Free transfer (%lu messages)...\n",
            (unsigned long)TOTAL_MESSAGES);
